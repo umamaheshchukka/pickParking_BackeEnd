@@ -4,8 +4,6 @@ const bcryptjs = require("bcryptjs");
 const _ = require("lodash");
 const sendEmail = require("../utilities/node-mailer/email");
 const { validationResult } = require("express-validator");
-
-//otp functiion to send otp
 const generateOtp = () => {
   const otp = Math.round(Math.random() * 10000);
   console.log(otp);

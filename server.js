@@ -1,5 +1,6 @@
 require("dotenv").config();
 const http = require("http");
+const path = require("path"); // Added path module
 const socketIo = require("socket.io");
 const express = require("express");
 const cors = require("cors");
@@ -7,8 +8,7 @@ const multer = require("multer");
 const { checkSchema } = require("express-validator");
 const configDb = require("./config/db");
 const nodeCronCtlr = require("./app/node-cron/bookingStatus");
-nodeCronCtlr();
-configDb();
+
 const {
   userRegisterSchemaValidation,
   usersLoginSchema,
@@ -36,56 +36,105 @@ const vehicleCtlr = require("./app/controllers/vehivle-controller");
 const bookingCntrl = require("./app/controllers/booking-controller");
 const paymentsCntrl = require("./app/controllers/payment-controller");
 const spaceCartCtlr = require("./app/controllers/spacecart-controller");
+
 const app = express();
-const port = 3045;
+const port = process.env.PORT || 3045; // Use environment variable for port
 const server = http.createServer(app);
+
+// Configure Socket.IO with specific origins for security
 const io = socketIo(server, {
   cors: {
-    origin: "*",
+    origin: process.env.CORS_ORIGIN || "*", // Use environment variable for CORS origin
     methods: ["GET", "POST"],
   },
 });
+
+// Socket.IO connection handling
 io.on("connection", (socket) => {
   console.log("Client connected:", socket.id);
+  socket.on("disconnect", () => {
+    console.log("Client disconnected:", socket.id);
+  });
 });
+
+// Initialize database connection
+const startServer = async () => {
+  try {
+    await configDb(); // Ensure DB connection is successful
+    console.log("Database connected successfully");
+
+    // Start cron job after DB connection
+    nodeCronCtlr();
+
+    // Start the server
+    server.listen(port, () => {
+      console.log(`Server is running on port ${port}`);
+    });
+  } catch (error) {
+    console.error("Failed to connect to database:", error);
+    process.exit(1); // Exit if DB connection fails
+  }
+};
+
+// Middleware
 app.use(cors());
 app.use(express.json());
-app.use("/uploads", express.static("uploads"));
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+
+// Multer configuration with file type and size validation
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
-    return cb(null, "./uploads");
+    cb(null, path.join(__dirname, "uploads"));
   },
   filename: function (req, file, cb) {
-    return cb(null, `${Date.now()}-${file.originalname}`);
+    cb(null, `${Date.now()}-${file.originalname}`);
   },
 });
-const upload = multer({ storage });
-//user Apis
+
+const fileFilter = (req, file, cb) => {
+  const allowedTypes = ["image/jpeg", "image/png", "application/pdf"];
+  if (allowedTypes.includes(file.mimetype)) {
+    cb(null, true);
+  } else {
+    cb(
+      new Error("Invalid file type. Only JPEG, PNG, and PDF are allowed."),
+      false
+    );
+  }
+};
+
+const upload = multer({
+  storage,
+  fileFilter,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+});
+
+// User APIs
 app.post(
   "/api/users/register",
   checkSchema(userRegisterSchemaValidation),
   usersCntrl.register
 );
 app.put(
-  "/api/verify/emails",
+  "/api/users/verify/email",
   checkSchema(userOtpValidation),
   usersCntrl.verifyEmail
 );
 app.post("/api/users/login", checkSchema(usersLoginSchema), usersCntrl.login);
 app.put(
-  "/API/update/password",
+  "/api/users/update/password",
   authenticateUser,
   checkSchema(usersupdatePasswordValidationSchema),
   usersCntrl.updatePassword
-); // updatePassword
-app.get("/api/users/accounts", authenticateUser, usersCntrl.accounts);
+);
+app.get("/api/users/account", authenticateUser, usersCntrl.accounts);
 app.post(
-  "/api/users/forgotpassword",
+  "/api/users/forgot-password",
   checkSchema(usersForgotPasswordSchema),
   usersCntrl.forgotPassword
 );
 app.put(
-  "/api/users/setforgotpassword",
+  "/api/users/set-forgot-password",
   checkSchema(usersSetPasswordSchema),
   usersCntrl.setFogotPassword
 );
@@ -95,221 +144,218 @@ app.get(
   usersCntrl.verifyOtp
 );
 
-//Owner apis
+// Owner APIs
 app.post(
-  "/api/parkingSpace/Register",
+  "/api/parking-spaces/register",
   authenticateUser,
-  authorizeUser(["owner"]),
+  authorizeUser(["customer", "owner"]),
   checkSchema(ParkingSpaceSchemaValidation),
   upload.single("image"),
   parkingSpaceCntrl.register
 );
 app.get(
-  "/api/parkingSpace/my",
+  "/api/parking-spaces/my",
   authenticateUser,
-  authorizeUser(["owner", "admin"]),
+  authorizeUser(["owner", "admin", "customer"]),
   parkingSpaceCntrl.mySpace
 );
 app.delete(
-  "/api/parkingSpace/:id",
+  "/api/parking-spaces/:id",
   authenticateUser,
   authorizeUser(["owner"]),
   parkingSpaceCntrl.remove
 );
 app.put(
-  "/api/parkingSpace/update/:id",
+  "/api/parking-spaces/update/:id",
   authenticateUser,
-  authorizeUser(["owner"]),
+  authorizeUser(["customer", "owner"]),
+  checkSchema(ParkingSpaceSchemaValidation),
+  upload.single("image"), // Added validation for consistency
   parkingSpaceCntrl.update
 );
 app.get(
-  "/api/myParkingSpace/booking",
+  "/api/parking-spaces/my/bookings",
   authenticateUser,
   authorizeUser(["owner"]),
   bookingCntrl.myParkingSpace
 );
 app.put(
-  "/api/approve/booking/:id",
+  "/api/bookings/approve/:id",
   authenticateUser,
   authorizeUser(["owner"]),
-  bookingCntrl.accept
-);
-app.delete(
-  "/api/parkingSpace/remove/:id",
-  authenticateUser,
-  authorizeUser(["owner"]),
-  parkingSpaceCntrl.remove
+  (req, res) => bookingCntrl.accept(req, res, io)
 );
 app.put(
-  "/api/parkingSpace/disable/:id",
+  "/api/parking-spaces/disable/:id",
   authenticateUser,
   authorizeUser(["owner"]),
   parkingSpaceCntrl.disable
 );
 
-//admin routes
+// Admin APIs
 app.get(
-  "/api/parkingSpace",
+  "/api/parking-spaces",
   authenticateUser,
   authorizeUser(["admin"]),
   parkingSpaceCntrl.list
 );
 app.get(
-  "/api/owner",
+  "/api/owners",
   authenticateUser,
   authorizeUser(["admin"]),
   usersCntrl.listOwner
 );
 app.get(
-  "/api/customer",
+  "/api/customers",
   authenticateUser,
   authorizeUser(["admin"]),
   usersCntrl.listCustomer
 );
 app.put(
-  "/api/parkingSpace/approve/:id",
+  "/api/parking-spaces/approve/:id",
   authenticateUser,
   authorizeUser(["admin"]),
   checkSchema(parkingSpaceApproveValidarion),
   parkingSpaceCntrl.approve
 );
-//app.get('/api/parkingSpace/approvalList',authenticateUser,authorizeUser(["admin"]),parkingSpaceCntrl.approvalList)
 app.get(
-  "/api/allBooking",
+  "/api/bookings",
   authenticateUser,
   authorizeUser(["admin"]),
   bookingCntrl.listBookings
 );
-//get all parking space within radius
-app.get("/api/parkingSpace/radius", parkingSpaceCntrl.findByLatAndLog);
 
-//find avaialble parking spacet
+// Public APIs
+app.get("/api/parking-spaces/radius", parkingSpaceCntrl.findByLatAndLog);
 app.get(
-  "/api/parkingSpace/:parkingSpaceId/spaceType/:spaceTypeId",
+  "/api/parking-spaces/:parkingSpaceId/space-types/:spaceTypeId",
   bookingCntrl.findSpace
 );
 
-//vehicle api's
+// Vehicle APIs
 app.post(
-  "/API/vehicle/register",
+  "/api/vehicles/register",
   authenticateUser,
   authorizeUser(["customer"]),
   checkSchema(vehicleValidationSchema),
   upload.single("documents"),
   vehicleCtlr.create
-); //vehicle create
+);
 app.get(
-  "/API/vehicles/list",
+  "/api/vehicles",
   authenticateUser,
   authorizeUser(["customer"]),
   vehicleCtlr.list
-); //vehicles list
+);
 app.put(
-  "/API/vehicles/update/:id",
+  "/api/vehicles/update/:id",
   authenticateUser,
   authorizeUser(["customer"]),
   checkSchema(vehicleValidationSchema),
   upload.single("documents"),
   vehicleCtlr.update
-); //vehicles update
+);
 app.put(
-  "/api/vehicle/approval/:id",
+  "/api/vehicles/approve/:id",
   authenticateUser,
   authorizeUser(["admin"]),
   vehicleCtlr.approve
 );
 app.delete(
-  "/API/vehicles/remove/:id",
+  "/api/vehicles/:id",
   authenticateUser,
   authorizeUser(["customer"]),
   vehicleCtlr.remove
-); //vehicles remove
+);
 
-// revies api's
+// Review APIs
 app.post(
-  "/api/booking/:bookingId/parkingSpace/:parkingSpaceId",
+  "/api/bookings/:bookingId/parking-spaces/:parkingSpaceId/reviews",
   authenticateUser,
   authorizeUser(["customer"]),
   checkSchema(reviesValidation),
   reviewsController.create
-); //create review
-app.get("/api/reviews/list", authenticateUser, reviewsController.list); //list of all reviews
+);
+app.get("/api/reviews", authenticateUser, reviewsController.list);
 app.get(
-  "/api/reviews/space/:id",
+  "/api/parking-spaces/:id/reviews",
   authenticateUser,
   authorizeUser(["owner"]),
   reviewsController.spaceReview
-); //listing based on space
+);
 app.delete(
-  "/api/reviews/remove/:id",
+  "/api/reviews/:id",
   authenticateUser,
   authorizeUser(["customer"]),
   reviewsController.remove
-); //remove review
+);
 app.put(
-  "/api/reviews/update/:id",
+  "/api/reviews/:id",
   authenticateUser,
   authorizeUser(["customer"]),
+  checkSchema(reviesValidation),
   reviewsController.update
 );
 
-//booking of parking space
+// Booking APIs
 app.post(
-  "/api/booking/:parkingSpaceId/spaceTypes/:spaceTypesId",
+  "/api/parking-spaces/:parkingSpaceId/space-types/:spaceTypesId/bookings",
   authenticateUser,
   authorizeUser(["customer"]),
   checkSchema(bookingParkingSpaceValidation),
   bookingCntrl.booking
 );
-app.get("/api/booking/my/:id", bookingCntrl.list);
+app.get("/api/bookings/my/:id", bookingCntrl.list);
 app.get(
-  "/api/bookings/list",
+  "/api/bookings/my",
   authenticateUser,
   authorizeUser(["customer"]),
   bookingCntrl.MyBookings
 );
 
-app.put(
-  "/api/approve/booking/:id",
-  authenticateUser,
-  authorizeUser(["owner"]),
-  (req, res) => {
-    bookingCntrl.accept(req, res, io);
-  }
-);
-
-//spcaecart api's
+// Space Cart APIs
 app.post(
-  "/api/spaceCarts/create/:id",
+  "/api/space-carts/:id",
   authenticateUser,
   authorizeUser(["customer"]),
   spaceCartCtlr.create
 );
 app.delete(
-  "/api/spacecart/delete/:id",
+  "/api/space-carts/:id",
   authenticateUser,
   authorizeUser(["customer"]),
   spaceCartCtlr.remove
 );
 app.get(
-  "/api/spacecart/list",
+  "/api/space-carts",
   authenticateUser,
   authorizeUser(["customer"]),
   spaceCartCtlr.list
 );
 
+// Admin Query API
 app.get(
   "/api/owners/query",
   authenticateUser,
   authorizeUser(["admin"]),
   usersCntrl.findOwners
 );
-app.put("/api/booking/payment/update/:id", bookingCntrl.updatePayment);
-app.put("/api/booking/payment/failer/:id", bookingCntrl.paymentFailerUpdate);
-//payment api's
-app.post("/api/create-checkout-session", paymentsCntrl.pay);
-app.put("/api/payment/status/update/:id", paymentsCntrl.successUpdate);
-app.put("/api/payment/failer/:id", paymentsCntrl.failerUpdate);
-app.listen(port, () => {
-  console.log("server is running in " + port);
+
+// Payment APIs
+app.put("/api/bookings/:id/payment", bookingCntrl.updatePayment);
+app.put("/api/bookings/:id/payment/failed", bookingCntrl.paymentFailerUpdate);
+app.post("/api/payments/create-checkout-session", paymentsCntrl.pay);
+app.put("/api/payments/:id/success", paymentsCntrl.successUpdate);
+app.put("/api/payments/:id/failed", paymentsCntrl.failerUpdate);
+
+// Global error handling middleware
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    return res.status(400).json({ error: "File upload error: " + err.message });
+  }
+  console.error(err.stack);
+  res.status(500).json({ error: "Something went wrong!" });
 });
+
+// Start the server
+startServer();
